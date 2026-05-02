@@ -23,4 +23,7 @@
 
   <!-- InfVerif.dll is not present in the NuGet-only WDK. Skip INF verification in CI. -->
   <Target Name="InfVerif" Condition="'$(GITHUB_ACTIONS)' == 'true'" />
+
+  <!-- drvcat.exe is not present in the NuGet-only WDK. Skip catalog metadata tagging in CI. -->
+  <Target Name="DrvCat" Condition="'$(GITHUB_ACTIONS)' == 'true'" />
 </Project>
