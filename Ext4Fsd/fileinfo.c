@@ -1117,20 +1117,22 @@ Ext2BlockMap(
     IN PEXT2_MCB            Mcb,
     IN ULONG                Index,
     IN BOOLEAN              bAlloc,
-    OUT PULONG              pBlock,
+    OUT PULONGLONG          pBlock,
     OUT PULONG              Number
 )
 {
 	NTSTATUS status;
+	ULONG block = 0;
 
 	if (INODE_HAS_EXTENT(&Mcb->Inode)) {
         status = Ext2MapExtent(IrpContext, Vcb, Mcb, Index,
-                               bAlloc, pBlock, Number );
+                               bAlloc, &block, Number );
 	} else {
         status = Ext2MapIndirect(IrpContext, Vcb, Mcb, Index,
-                                 bAlloc, pBlock, Number );
+                                 bAlloc, &block, Number );
     }
 
+	*pBlock = block;
 	return status;
 }
 

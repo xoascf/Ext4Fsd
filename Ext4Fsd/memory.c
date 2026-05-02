@@ -1258,15 +1258,17 @@ Ext2BuildExtents(
         /* try to BlockMap in case failed to access Extents cache */
         if (!IsZoneInited(Mcb) || (bAlloc && Block == 0)) {
 
+            ULONGLONG llBlock = 0;
             Status = Ext2BlockMap(
                              IrpContext,
                              Vcb,
                              Mcb,
                              Start,
                              bAlloc,
-                             &Block,
+                             &llBlock,
                              &Mapped
                      );
+            Block = (ULONG)llBlock;
             if (!NT_SUCCESS(Status)) {
                 break;
             }
@@ -3141,7 +3143,7 @@ Ext2McbReaperThread(
 /* get buffer heads from global Vcb BH list */
 
 BOOLEAN
-Ext2QueryUnusedBH(PEXT2_VCB Vcb, PLIST_ENTRY head)
+Ext2QueryUnusedBH(PEXT2_VCB Vcb, PBOOLEAN DidSomething)
 {
     struct buffer_head *bh = NULL;
     PLIST_ENTRY         next = NULL;
@@ -3170,8 +3172,9 @@ Ext2QueryUnusedBH(PEXT2_VCB Vcb, PLIST_ENTRY head)
         if ( IsFlagOn(Vcb->Flags, VCB_BEING_DROPPED) ||
             (bh->b_ts_drop.QuadPart + (LONGLONG)10*1000*1000*15) > now.QuadPart ||
             (bh->b_ts_creat.QuadPart + (LONGLONG)10*1000*1000*180) > now.QuadPart) {
-            InsertTailList(head, &bh->b_link);
             buffer_head_remove(&Vcb->bd, bh);
+            free_buffer_head(bh);
+            if (DidSomething) *DidSomething = TRUE;
         } else {
             InsertHeadList(&Vcb->bd.bd_bh_free, &bh->b_link);
             break;
@@ -3195,11 +3198,11 @@ Ext2bhReaperThread(
 {
     PEXT2_REAPER    Reaper = Context;
     PEXT2_VCB       Vcb = NULL;
-    LIST_ENTRY      List, *Link;
+    LIST_ENTRY     *Link;
     LARGE_INTEGER   Timeout;
 
     BOOLEAN         GlobalAcquired = FALSE;
-    BOOLEAN         DidNothing = FALSE;
+    BOOLEAN         DidSomething = FALSE;
     BOOLEAN         NonWait = FALSE;
 
     __try {
@@ -3216,7 +3219,7 @@ Ext2bhReaperThread(
             if (NonWait) {
                 Timeout.QuadPart = (LONGLONG)-10*1000*10;
                 NonWait = FALSE;
-            } else if (DidNothing) {
+            } else if (!DidSomething) {
                 Timeout.QuadPart = Timeout.QuadPart * 2;
             } else {
                 Timeout.QuadPart = (LONGLONG)-10*1000*1000*10; /* 10 seconds */
@@ -3232,7 +3235,7 @@ Ext2bhReaperThread(
             if (IsFlagOn(Reaper->Flags, EXT2_REAPER_FLAG_STOP))
                 break;
 
-            InitializeListHead(&List);
+            DidSomething = FALSE;
 
             /* acquire global exclusive lock */
             ExAcquireResourceSharedLite(&Ext2Global->Resource, TRUE);
@@ -3243,23 +3246,16 @@ Ext2bhReaperThread(
                  Link = Link->Flink ) {
 
                 Vcb = CONTAINING_RECORD(Link, EXT2_VCB, Next);
-                NonWait = Ext2QueryUnusedBH(Vcb, &List);
+                if (Ext2QueryUnusedBH(Vcb, &DidSomething)) {
+                    NonWait = TRUE;
+                }
             }
-            DidNothing = IsListEmpty(&List);
-            if (DidNothing) {
+            if (!DidSomething) {
                 KeClearEvent(&Reaper->Wait);
             }
             if (GlobalAcquired) {
                 ExReleaseResourceLite(&Ext2Global->Resource);
                 GlobalAcquired = FALSE;
-            }
-
-            while (!IsListEmpty(&List)) {
-                struct buffer_head *bh;
-                Link = RemoveHeadList(&List);
-                bh = CONTAINING_RECORD(Link, struct buffer_head, b_link);
-                ASSERT(0 == atomic_read(&bh->b_count));
-                free_buffer_head(bh);
             }
         }
 

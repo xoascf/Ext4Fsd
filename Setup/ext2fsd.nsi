@@ -13,6 +13,8 @@
 ;  ext2, ext3 and ext4 filesystems)
 ;
 Unicode true
+!include "x64.nsh"
+
 Name "Ext2,Ext3,Ext4 filesystem driver"
 !define PROJECTNAME "Ext2Fsd"
 !define DRIVERNAME "Ext2Fsd"
@@ -24,16 +26,36 @@ OutFile "${PROJECTNAME}-setup.exe"
 
 ; the paths to the binaries when compiled with Visual Studio to support Windows 10.
 ; (the driver files are automatically signed or testsigned by Visual Studio)
+!ifndef MGRPATH_X86
 !define MGRPATH_X86 "..\Ext2Mgr\Release\x86"
+!endif
+!ifndef MGRPATH_X64
 !define MGRPATH_X64 "..\Ext2Mgr\Release\x64"
+!endif
+!ifndef SRVPATH_X86
 !define SRVPATH_X86 "..\Ext2Srv\Release\x86"
+!endif
+!ifndef SRVPATH_X64
 !define SRVPATH_X64 "..\Ext2Srv\Release\x64"
+!endif
+!ifndef SYSPATH_X86
 !define SYSPATH_X86 "..\drivers\Release\x86"
+!endif
+!ifndef SYSPATH_X64
 !define SYSPATH_X64 "..\drivers\Release\x64"
+!endif
+!ifndef MSVPATH_X86
 !define MSVPATH_X86 "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\x86\Microsoft.VC143.CRT"
+!endif
+!ifndef MSVPATH_X64
 !define MSVPATH_X64 "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\x64\Microsoft.VC143.CRT"
+!endif
+!ifndef MFCPATH_X86
 !define MFCPATH_X86 "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\x86\Microsoft.VC143.MFC"
+!endif
+!ifndef MFCPATH_X64
 !define MFCPATH_X64 "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\x64\Microsoft.VC143.MFC"
+!endif
 !define VCDLL_X86 "vcruntime140"
 !define VCDLL_X64A "vcruntime140"
 !define VCDLL_X64B "vcruntime140_1"
@@ -80,8 +102,25 @@ Section "Driver"
 SetShellVarContext all
 ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PROJECTNAME}" \
                    "UninstallString"
-StrCmp $0 "" install
+StrCmp $0 "" check_secureboot
     ; uninstall an old version if any.
+
+check_secureboot:
+; Abort if Secure Boot is enabled: test-signed drivers cannot load with Secure Boot active.
+ReadRegDWORD $0 HKLM "SYSTEM\CurrentControlSet\Control\SecureBoot\State" "UEFISecureBootEnabled"
+IntCmp $0 1 secureboot_on secureboot_off secureboot_off
+secureboot_on:
+    MessageBox MB_ICONSTOP|MB_OK "Secure Boot is enabled on this system.$\n$\nThis driver uses test-signing and cannot be loaded while Secure Boot is active.$\n$\nPlease disable Secure Boot in your UEFI/BIOS firmware settings, then run this installer again."
+    Abort
+secureboot_off:
+
+; Inform the user that test-signing mode will be enabled.
+MessageBox MB_OKCANCEL|MB_ICONINFORMATION \
+    "This installer will:$\n$\n  \x95 Trust the Ext2Fsd test certificate$\n  \x95 Enable Windows Test-Signing mode$\n  \x95 Register the Ext2Fsd driver service$\n$\nA restart is required after installation for the driver to activate.$\n$\nNote: Test-Signing mode shows a watermark on the desktop. It does not weaken general OS security." \
+    IDOK ts_notice_ok
+    Abort
+ts_notice_ok:
+
 install:
 
 SetOutPath $INSTDIR
@@ -96,18 +135,24 @@ IfFileExists $WINDIR\SysWOW64\*.* 0 else
     File "${SRVPATH_X64}\Ext2Srv.exe"
 ;    File "${SYSPATH_X64}\${DRIVERNAME}.pdb"
     File "${SYSPATH_X64}\${DRIVERNAME}.sys"
+    File "${SYSPATH_X64}\${DRIVERNAME}.inf"
+    File "${SYSPATH_X64}\${DRIVERNAME}.cat"
+    File "${SYSPATH_X64}\${DRIVERNAME}-TestSign.cer"
     Goto endif
 else:
     ; 32-bit.
+!ifndef X64_ONLY
     File "${MSVPATH_X86}\${VCDLL_X86}.dll"
     File "${MFCPATH_X86}\${MFCDLL}.dll"
     File "${MGRPATH_X86}\Ext2Mgr.exe"
     File "${SRVPATH_X86}\Ext2Srv.exe"
 ;    File "${SYSPATH_X86}\${DRIVERNAME}.pdb"
     File "${SYSPATH_X86}\${DRIVERNAME}.sys"
+    File "${SYSPATH_X86}\${DRIVERNAME}.inf"
+    File "${SYSPATH_X86}\${DRIVERNAME}.cat"
+    File "${SYSPATH_X86}\${DRIVERNAME}-TestSign.cer"
+!endif
 endif:
-
-File "..\ext4fsd\${DRIVERNAME}.inf"
 
 SetOutPath $INSTDIR\Documents
 File "..\ext4fsd\COPYRIGHT.txt"
@@ -115,16 +160,42 @@ File "..\ext4fsd\FAQ.txt"
 File "..\ext4fsd\notes.txt"
 File "..\ext4fsd\readme.txt"
 
-; install the driver.
-IfFileExists $WINDIR\SysWOW64\*.* 0 else32
-    ; 64-bit
-    ; the install program is a 32-bit process so the 64-bit version of rundll32 is found in the sysnative directory.
-    ExecWait '"$WINDIR\sysnative\rundll32.exe" setupapi.dll,InstallHinfSection DefaultInstall 132 $INSTDIR\${DRIVERNAME}.inf'
-    Goto endif32
-else32:
-    ; 32-bit
-    ExecWait '"rundll32.exe" setupapi.dll,InstallHinfSection DefaultInstall 132 $INSTDIR\${DRIVERNAME}.inf'
-endif32:
+; Install the test certificate into the machine certificate stores.
+; certutil.exe is present in both System32 and SysWOW64 on 64-bit Windows.
+ExecWait '"$SYSDIR\certutil.exe" -addstore TrustedPublisher "$INSTDIR\${DRIVERNAME}-TestSign.cer"' $0
+ExecWait '"$SYSDIR\certutil.exe" -addstore Root "$INSTDIR\${DRIVERNAME}-TestSign.cer"' $0
+
+; Enable test-signing mode (takes effect after the next reboot).
+; bcdedit.exe only exists in 64-bit System32, so use sysnative on 64-bit Windows.
+IfFileExists $WINDIR\SysWOW64\*.* 0 bcdedit_32bit
+    ExecWait '"$WINDIR\sysnative\bcdedit.exe" /set testsigning on' $0
+    Goto bcdedit_done
+bcdedit_32bit:
+    ExecWait '"$SYSDIR\bcdedit.exe" /set testsigning on' $0
+bcdedit_done:
+
+; Copy the driver binary to System32\drivers.
+; Disable WOW64 filesystem redirection so we write to the real 64-bit System32.
+IfFileExists $WINDIR\SysWOW64\*.* 0 copy_sys_32bit
+    ${DisableX64FSRedirection}
+    CopyFiles /SILENT "$INSTDIR\${DRIVERNAME}.sys" "$WINDIR\System32\drivers\${DRIVERNAME}.sys"
+    ${EnableX64FSRedirection}
+    Goto copy_sys_done
+copy_sys_32bit:
+    CopyFiles /SILENT "$INSTDIR\${DRIVERNAME}.sys" "$WINDIR\System32\drivers\${DRIVERNAME}.sys"
+copy_sys_done:
+
+; Register the kernel filesystem driver service in the Windows SCM.
+; Signature validation occurs when the kernel loads the driver at startup;
+; test-signing mode (enabled above) must be active at that point (after reboot).
+ExecWait '"$SYSDIR\sc.exe" stop ${DRIVERNAME}' $0
+ExecWait '"$SYSDIR\sc.exe" delete ${DRIVERNAME}' $0
+IfFileExists $WINDIR\SysWOW64\*.* 0 sccreate_32bit
+    ExecWait '"$WINDIR\sysnative\sc.exe" create ${DRIVERNAME} type= filesys start= system error= normal binpath= "\SystemRoot\system32\drivers\${DRIVERNAME}.sys" displayname= "Ext2,3,4 Filesystem Service"' $0
+    Goto sccreate_done
+sccreate_32bit:
+    ExecWait '"$SYSDIR\sc.exe" create ${DRIVERNAME} type= filesys start= system error= normal binpath= "\SystemRoot\system32\drivers\${DRIVERNAME}.sys" displayname= "Ext2,3,4 Filesystem Service"' $0
+sccreate_done:
 
 ; create the uninstaller.
 WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PROJECTNAME}" \
@@ -143,9 +214,14 @@ createShortCut "$SMPROGRAMS\${PROJECTNAME}\Documents\FAQ.lnk" "$INSTDIR\Document
 createShortCut "$SMPROGRAMS\${PROJECTNAME}\Documents\Release notes.lnk" "$INSTDIR\Documents\notes.txt" "" "" "" SW_SHOWNORMAL "" "Release notes"
 createShortCut "$SMPROGRAMS\${PROJECTNAME}\Documents\README.lnk" "$INSTDIR\Documents\readme.txt" "" "" "" SW_SHOWNORMAL "" "README"
 
-; install Ext2Srv and start the driver.
+; Install Ext2Srv (the user-mode management service).
 ExecWait '"$INSTDIR\Ext2Srv.exe" /installasservice'
-ExecWait '"net.exe" start ${DRIVERNAME}'
+
+; A reboot is required to activate test-signing mode and load the driver.
+; The driver service (${DRIVERNAME}) is set to start automatically on boot.
+MessageBox MB_ICONINFORMATION|MB_OK \
+    "Installation complete.$\n$\nPlease restart your computer to activate the driver.$\n$\nAfter restart, the Ext2Fsd driver will load automatically."
+SetRebootFlag true
 SectionEnd
 
 Function un.onInit
@@ -168,21 +244,41 @@ FunctionEnd
 Section "Uninstall"
 SetShellVarContext all
 
-; stop and uninstall Ext2Srv.
+; Stop and uninstall Ext2Srv (user-mode service).
 ExecWait '"net.exe" stop ext2srv'
 ExecWait '"$INSTDIR\Ext2Srv.exe" /removeservice'
 
-; uninstall the driver.
+; Stop and delete the Ext2Fsd driver service.
+IfFileExists $WINDIR\SysWOW64\*.* 0 scdel_32bit
+    ExecWait '"$WINDIR\sysnative\sc.exe" stop ${DRIVERNAME}' $0
+    ExecWait '"$WINDIR\sysnative\sc.exe" delete ${DRIVERNAME}' $0
+    Goto scdel_done
+scdel_32bit:
+    ExecWait '"$SYSDIR\sc.exe" stop ${DRIVERNAME}' $0
+    ExecWait '"$SYSDIR\sc.exe" delete ${DRIVERNAME}' $0
+scdel_done:
+
+; Remove the test certificate from the machine trust stores.
+ExecWait '"$SYSDIR\certutil.exe" -delstore TrustedPublisher "Ext2Fsd Test Certificate"' $0
+ExecWait '"$SYSDIR\certutil.exe" -delstore Root "Ext2Fsd Test Certificate"' $0
+
+; Delete the driver binary from System32\drivers.
+IfFileExists $WINDIR\SysWOW64\*.* 0 delsys_32bit
+    ${DisableX64FSRedirection}
+    Delete "$WINDIR\System32\drivers\${DRIVERNAME}.sys"
+    ${EnableX64FSRedirection}
+    Goto delsys_done
+delsys_32bit:
+    Delete "$WINDIR\System32\drivers\${DRIVERNAME}.sys"
+delsys_done:
+
+; Delete redistributable DLLs (architecture-specific).
 IfFileExists $WINDIR\SysWOW64\*.* 0 else
-    ; 64-bit
-    ExecWait '"$WINDIR\sysnative\rundll32.exe" setupapi.dll,InstallHinfSection DefaultUninstall 132 $INSTDIR\${DRIVERNAME}.inf'
-    Delete $INSTDIR\${VCDLL_X64A}.dll"
-    Delete $INSTDIR\${VCDLL_X64B}.dll"
+    Delete "$INSTDIR\${VCDLL_X64A}.dll"
+    Delete "$INSTDIR\${VCDLL_X64B}.dll"
     Goto endif
 else:
-    ; 32-bit
-    ExecWait '"rundll32.exe" setupapi.dll,InstallHinfSection DefaultUninstall 132 $INSTDIR\${DRIVERNAME}.inf'
-    Delete $INSTDIR\${VCDLL_X86}.dll"
+    Delete "$INSTDIR\${VCDLL_X86}.dll"
 endif:
 
 ; delete the start menu items.
@@ -202,6 +298,8 @@ Delete $INSTDIR\Documents\notes.txt"
 Delete $INSTDIR\Documents\readme.txt"
 
 Delete $INSTDIR\${DRIVERNAME}.inf
+Delete $INSTDIR\${DRIVERNAME}.cat
+Delete $INSTDIR\${DRIVERNAME}-TestSign.cer
 ;Delete $INSTDIR\${DRIVERNAME}.pdb
 Delete $INSTDIR\${DRIVERNAME}.sys
 Delete $INSTDIR\${MFCDLL}.dll"

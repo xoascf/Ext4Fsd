@@ -24,11 +24,11 @@ static ext4_fsblk_t ext4_new_meta_blocks(void *icb, struct inode *inode,
 {
 	NTSTATUS status;
 	ULONG blockcnt = (count) ? *count : 1;
-	ULONG block = 0;
+	ULONGLONG block = 0;
 
 	status = Ext2NewBlock((PEXT2_IRP_CONTEXT)icb,
 		inode->i_sb->s_priv,
-		0, (ULONG)goal,
+		0, goal,
 		&block,
 		&blockcnt);
 	if (count)
@@ -45,7 +45,7 @@ static ext4_fsblk_t ext4_new_meta_blocks(void *icb, struct inode *inode,
 static void ext4_free_blocks(void *icb, struct inode *inode,
 	ext4_fsblk_t block, int count, int flags)
 {
-	Ext2FreeBlock((PEXT2_IRP_CONTEXT)icb, inode->i_sb->s_priv, (ULONG)block, count);
+	Ext2FreeBlock((PEXT2_IRP_CONTEXT)icb, inode->i_sb->s_priv, block, count);
 	inode->i_blocks -= count * (inode->i_sb->s_blocksize >> 9);
 	return;
 }

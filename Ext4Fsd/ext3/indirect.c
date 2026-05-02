@@ -29,8 +29,8 @@ Ext2ExpandLast(
     IN ULONG                Base,
     IN ULONG                Layer,
     IN PULONG *             Data,
-    IN PULONG               Hint,
-    IN PULONG               Block,
+    IN PULONGLONG           Hint,
+    IN PULONGLONG           Block,
     IN OUT PULONG           Number
 )
 {
@@ -80,11 +80,11 @@ Ext2ExpandLast(
             pEntry = (PEXT2_DIR_ENTRY2) pData;
             pEntry->rec_len = (USHORT)(BLOCK_SIZE);
             ASSERT(*Number == 1);
-            Ext2SaveBlock(IrpContext, Vcb, *Block, (PVOID)pData);
+            Ext2SaveBlock(IrpContext, Vcb, (ULONG)*Block, (PVOID)pData);
         }
 
         /* add new Extent into Mcb */
-        if (!Ext2AddBlockExtent(Vcb, Mcb, Base, (*Block), *Number)) {
+        if (!Ext2AddBlockExtent(Vcb, Mcb, Base, (ULONG)(*Block), *Number)) {
             DbgBreak();
             ClearFlag(Mcb->Flags, MCB_ZONE_INITED);
             Ext2ClearAllExtents(&Mcb->Extents);
@@ -94,12 +94,12 @@ Ext2ExpandLast(
 
         /* zero the content of all meta blocks */
         for (i = 0; i < *Number; i++) {
-            Ext2SaveBlock(IrpContext, Vcb, *Block + i, (PVOID)pData);
+            Ext2SaveBlock(IrpContext, Vcb, (ULONG)(*Block + i), (PVOID)pData);
             /* add block to meta extents */
-            if (!Ext2AddMcbMetaExts(Vcb, Mcb, *Block + i, 1)) {
+            if (!Ext2AddMcbMetaExts(Vcb, Mcb, (ULONG)(*Block + i), 1)) {
                 DbgBreak();
                 Ext2Sleep(500);
-                Ext2AddMcbMetaExts(Vcb, Mcb, *Block + i, 1);
+                Ext2AddMcbMetaExts(Vcb, Mcb, (ULONG)(*Block + i), 1);
             }
         }
     }
@@ -143,8 +143,8 @@ Ext2GetBlock(
     IN ULONG                SizeArray,
     IN PULONG               BlockArray,
     IN BOOLEAN              bAlloc,
-    IN OUT PULONG           Hint,
-    OUT PULONG              Block,
+    IN OUT PULONGLONG       Hint,
+    OUT PULONGLONG          Block,
     OUT PULONG              Number
 )
 {
@@ -161,6 +161,7 @@ Ext2GetBlock(
         *Number = 1;
         if (BlockArray[0] == 0 && bAlloc) {
 
+            ULONGLONG dwBlk = 0;
             /* now allocate new block */
             Status = Ext2ExpandLast(
                          IrpContext,
@@ -170,13 +171,14 @@ Ext2GetBlock(
                          Layer,
                          NULL,
                          Hint,
-                         &BlockArray[0],
+                         &dwBlk,
                          Number
                      );
 
             if (!NT_SUCCESS(Status)) {
                 goto errorout;
             }
+            BlockArray[0] = (ULONG)dwBlk;
         } else {
             /* check the block is valid or not */
             if (BlockArray[0] >= TOTAL_BLOCKS) {
@@ -243,6 +245,7 @@ Ext2GetBlock(
                 /* we need allocate new block and zero all data in case
                    it's an in-direct block. Index stores the new block no. */
                 ULONG   Count = 1;
+                ULONGLONG dwBlk = 0;
                 Status = Ext2ExpandLast(
                              IrpContext,
                              Vcb,
@@ -251,13 +254,14 @@ Ext2GetBlock(
                              Layer,
                              NULL,
                              Hint,
-                             &pData[Slot],
+                             &dwBlk,
                              &Count
                          );
 
                 if (!NT_SUCCESS(Status)) {
                     goto errorout;
                 }
+                pData[Slot] = (ULONG)dwBlk;
 
                 /* refresh hint block */
                 *Hint = pData[Slot];
@@ -347,14 +351,14 @@ Ext2ExpandBlock(
     IN ULONG             Start,
     IN ULONG             SizeArray,
     IN PULONG            BlockArray,
-    IN PULONG            Hint,
+    IN PULONGLONG        Hint,
     IN PULONG            Extra
 )
 {
     ULONG       i = 0;
     ULONG       j;
     ULONG       Slot;
-    ULONG       Block = 0;
+    ULONGLONG   Block = 0;
     LARGE_INTEGER Offset;
 
     PBCB        Bcb = NULL;
@@ -406,7 +410,7 @@ Ext2ExpandBlock(
             Wanted -= Number;
             while (Number) {
                 if (BlockArray[i] == 0) {
-                    BlockArray[i] = Block++;
+                    BlockArray[i] = (ULONG)Block++;
                     Number--;
                 }
                 i++;
@@ -470,7 +474,7 @@ Ext2ExpandBlock(
 
                 ASSERT(Number > 0);
                 for (j = 0; j < Number; j++) {
-                    BlockArray[i + j] = Block++;
+                    BlockArray[i + j] = (ULONG)Block++;
                 }
             }
 
@@ -497,17 +501,23 @@ Ext2ExpandBlock(
 
             if (BlockArray[i] == 0) {
                 Number = 1;
-                Status = Ext2ExpandLast(
-                             IrpContext,
-                             Vcb,
-                             Mcb,
-                             Base,
-                             Layer,
-                             &pData,
-                             Hint,
-                             &BlockArray[i],
-                             &Number
-                         );
+                {
+                    ULONGLONG dwTmpBlk = 0;
+                    Status = Ext2ExpandLast(
+                                 IrpContext,
+                                 Vcb,
+                                 Mcb,
+                                 Base,
+                                 Layer,
+                                 &pData,
+                                 Hint,
+                                 &dwTmpBlk,
+                                 &Number
+                             );
+                    if (NT_SUCCESS(Status)) {
+                        BlockArray[i] = (ULONG)dwTmpBlk;
+                    }
+                }
                 if (!NT_SUCCESS(Status)) {
                     goto errorout;
                 }
@@ -844,7 +854,8 @@ Ext2MapIndirect(
 
         if (Index < Vcb->max_blocks_per_layer[Layer]) {
 
-            ULONG   dwRet = 0, dwBlk = 0, dwHint = 0, dwArray = 0;
+            ULONGLONG dwRet = 0, dwBlk = 0, dwHint = 0;
+            ULONG   dwArray = 0;
 
             Slot = (Layer==0) ? (Index):(Layer + EXT2_NDIR_BLOCKS - 1);
             dwBlk = Mcb->Inode.i_block[Slot];
@@ -881,7 +892,7 @@ Ext2MapIndirect(
                     }
 
                     /* save the it into inode*/
-                    Mcb->Inode.i_block[Slot] = dwBlk;
+                    Mcb->Inode.i_block[Slot] = (ULONG)dwBlk;
 
                     /* save the inode */
                     if (!Ext2SaveInode(IrpContext, Vcb, &Mcb->Inode)) {
@@ -914,7 +925,7 @@ Ext2MapIndirect(
                      );
 
             if (NT_SUCCESS(Status)) {
-                *pBlock = dwRet;
+                *pBlock = (ULONG)dwRet;
             }
 
             break;
@@ -942,7 +953,7 @@ Ext2ExpandIndirect(
 
     ULONG    Layer = 0;
     ULONG    Extra = 0;
-    ULONG    Hint = 0;
+    ULONGLONG Hint = 0;
     ULONG    Slot = 0;
     ULONG    Base = 0;
 

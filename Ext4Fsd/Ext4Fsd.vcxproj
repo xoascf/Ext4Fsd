@@ -299,6 +299,9 @@
     <FilesToPackage Include="$(TargetPath)" />
   </ItemGroup>
   <ItemGroup>
+    <Inf Include="Ext2Fsd.inf" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="access.c" />
     <ClCompile Include="block.c" />
     <ClCompile Include="cleanup.c" />

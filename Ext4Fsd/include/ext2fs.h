@@ -1877,8 +1877,8 @@ Ext2GetBlock(
     IN ULONG                SizeArray,
     IN PULONG               BlockArray,
     IN BOOLEAN              bAlloc,
-    IN OUT PULONG           Hint,
-    OUT PULONG              Block,
+    IN OUT PULONGLONG       Hint,
+    OUT PULONGLONG          Block,
     OUT PULONG              Number
 );
 
@@ -1889,7 +1889,7 @@ Ext2BlockMap(
     IN PEXT2_MCB            Mcb,
     IN ULONG                Index,
     IN BOOLEAN              bAlloc,
-    OUT PULONG              pBlock,
+    OUT PULONGLONG          pBlock,
     OUT PULONG              Number
 );
 
@@ -1904,8 +1904,8 @@ Ext2NewBlock(
     IN PEXT2_IRP_CONTEXT    IrpContext,
     IN PEXT2_VCB            Vcb,
     IN ULONG                GroupHint,
-    IN ULONG                BlockHint,
-    OUT PULONG              Block,
+    IN ULONGLONG            BlockHint,
+    OUT PULONGLONG          Block,
     IN OUT PULONG           Number
 );
 
@@ -1913,7 +1913,7 @@ NTSTATUS
 Ext2FreeBlock(
     IN PEXT2_IRP_CONTEXT    IrpContext,
     IN PEXT2_VCB            Vcb,
-    IN ULONG                Block,
+    IN ULONGLONG            Block,
     IN ULONG                Number
 );
 

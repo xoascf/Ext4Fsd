@@ -1,0 +1,26 @@
+<Project>
+  <!-- ApiValidator.exe is not included in NuGet WDK packages (only in full WDK installs).
+       Override the target to a no-op so the build succeeds in CI. -->
+  <Target Name="ApiValidator" Condition="'$(GITHUB_ACTIONS)' == 'true'" />
+
+  <!-- stampinf.exe is not present in the NuGet-only toolchain.
+       Copy the source INF straight to the output dir so DriverPackageTarget can find it. -->
+  <Target Name="StampInf" Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <Copy
+      SourceFiles="@(Inf->'$(MSBuildProjectDirectory)\\%(Filename)%(Extension)')"
+      DestinationFiles="@(Inf->'$(OutDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- DriverPackageTarget in NuGet-only CI expects the INF at Configuration\Platform.
+       Ensure the file exists at that relative path before packaging. -->
+  <Target Name="EnsureInfForDriverPackage" BeforeTargets="DriverPackageTarget" Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <Copy
+      SourceFiles="@(Inf->'$(MSBuildProjectDirectory)\\%(Filename)%(Extension)')"
+      DestinationFiles="@(Inf->'$(Configuration)\\$(Platform)\\%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- InfVerif.dll is not present in the NuGet-only WDK. Skip INF verification in CI. -->
+  <Target Name="InfVerif" Condition="'$(GITHUB_ACTIONS)' == 'true'" />
+</Project>

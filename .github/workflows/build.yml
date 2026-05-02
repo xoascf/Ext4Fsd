@@ -1,0 +1,183 @@
+name: Build Ext4Fsd Driver
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, ARM64]
+        configuration: [Release]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: packages
+          key: nuget-${{ hashFiles('packages.config') }}
+
+      - name: Install WDK and SDK via NuGet
+        run: nuget restore packages.config -OutputDirectory packages
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build driver
+        run: |
+          msbuild Ext4Fsd.sln `
+            /p:Configuration=${{ matrix.configuration }} `
+            /p:Platform=${{ matrix.platform }} `
+            /p:WindowsTargetPlatformVersion=10.0.26100.0 `
+            /m /v:normal
+
+      - name: Upload driver artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Ext4Fsd-${{ matrix.configuration }}-${{ matrix.platform }}
+          path: |
+            **/*.sys
+            **/*.cat
+            **/*.inf
+            **/*.pdb
+          if-no-files-found: warn
+
+  installer:
+    runs-on: windows-2022
+    needs: build
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v5
+        with:
+          path: packages
+          key: nuget-${{ hashFiles('packages.config') }}
+
+      - name: Install WDK and SDK via NuGet
+        run: nuget restore packages.config -OutputDirectory packages
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Build x64 Release
+        run: |
+          msbuild Ext4Fsd.sln `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:WindowsTargetPlatformVersion=10.0.26100.0 `
+            /m /v:minimal
+
+      - name: Sign driver (test-signing)
+        run: |
+          $outDir = "Ext4Fsd\Release\x64\Ext4Fsd"
+
+          # Stamp the INF DriverVer with today's date (replaces missing stampinf.exe)
+          $today = (Get-Date -Format "MM/dd/yyyy")
+          (Get-Content "$outDir\Ext2Fsd.inf") `
+            -replace '(?m)^DriverVer\s*=.*', "DriverVer   = $today,0.71.0.0" |
+            Set-Content "$outDir\Ext2Fsd.inf" -Encoding UTF8
+
+          # Create a per-build test-signing certificate
+          $cert = New-SelfSignedCertificate `
+            -Type CodeSigningCert `
+            -Subject "CN=Ext2Fsd Test Certificate" `
+            -KeyUsage DigitalSignature `
+            -FriendlyName "Ext2Fsd Test Certificate" `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -HashAlgorithm SHA256 `
+            -NotAfter (Get-Date).AddYears(10)
+
+          # Export .cer so the installer can place it on end-user machines
+          Export-Certificate -Cert $cert `
+            -FilePath "$outDir\Ext2Fsd-TestSign.cer" -Type CERT
+
+          # Find signtool.exe and makecat.exe from the Windows SDK installed with VS
+          $sdkBin = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
+            Where-Object { $_.Name -match '^\d' } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1).FullName
+          $signtool = "$sdkBin\x64\signtool.exe"
+          $makecat  = "$sdkBin\x64\makecat.exe"
+          Write-Host "signtool : $signtool"
+          Write-Host "makecat  : $makecat"
+          if (-not (Test-Path $signtool)) { throw "signtool.exe not found at $signtool" }
+          if (-not (Test-Path $makecat))  { throw "makecat.exe not found at $makecat"  }
+
+          # Sign Ext2Fsd.sys
+          & $signtool sign /v /sha1 $cert.Thumbprint /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 `
+            "$outDir\Ext2Fsd.sys"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed on Ext2Fsd.sys" }
+
+          # Build a catalog definition file (array avoids YAML indentation issues)
+          $abs = (Resolve-Path $outDir).Path
+          @(
+            "[CatalogHeader]",
+            "Name=Ext2Fsd.cat",
+            "ResultDir=$abs",
+            "PublicVersion=0x0000001",
+            "EncodingType=0x00010001",
+            "CATATTR1=0x10010001:OSAttr:2:10.0",
+            "",
+            "[CatalogFiles]",
+            "<HASH>Ext2Fsd.sys=$abs\Ext2Fsd.sys",
+            "<HASH>Ext2Fsd.inf=$abs\Ext2Fsd.inf"
+          ) | Out-File -Encoding ASCII "Ext2Fsd.cdf"
+
+          # Generate the catalog
+          & $makecat "Ext2Fsd.cdf"
+          if ($LASTEXITCODE -ne 0) { throw "makecat failed" }
+
+          # Sign the catalog
+          & $signtool sign /v /sha1 $cert.Thumbprint /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 `
+            "$abs\Ext2Fsd.cat"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed on Ext2Fsd.cat" }
+
+          Write-Host "Test-signing complete. Thumbprint: $($cert.Thumbprint)"
+        shell: pwsh
+
+      - name: Install NSIS
+        run: choco install nsis --no-progress -y
+
+      - name: Find VS Redist paths
+        id: vspaths
+        run: |
+          $vsInstall = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -property installationPath
+          $msvcVer = (Get-ChildItem "$vsInstall\VC\Redist\MSVC" -Directory | Where-Object { $_.Name -match '^\d' } | Sort-Object Name -Descending | Select-Object -First 1).Name
+          $msvPath = "$vsInstall\VC\Redist\MSVC\$msvcVer\x64\Microsoft.VC143.CRT"
+          $mfcPath = "$vsInstall\VC\Redist\MSVC\$msvcVer\x64\Microsoft.VC143.MFC"
+          echo "MSVPATH_X64=$msvPath" >> $env:GITHUB_OUTPUT
+          echo "MFCPATH_X64=$mfcPath" >> $env:GITHUB_OUTPUT
+          Write-Host "MSVC redist: $msvPath"
+          Write-Host "MFC redist:  $mfcPath"
+
+      - name: Build installer
+        run: |
+          cd Setup
+          makensis `
+            /DX64_ONLY `
+            /DSYSPATH_X64="..\Ext4Fsd\Release\x64\Ext4Fsd" `
+            "/DMSVPATH_X64=${{ steps.vspaths.outputs.MSVPATH_X64 }}" `
+            "/DMFCPATH_X64=${{ steps.vspaths.outputs.MFCPATH_X64 }}" `
+            ext2fsd.nsi
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: Ext2Fsd-setup
+          path: Setup/Ext2Fsd-setup.exe
+          if-no-files-found: error

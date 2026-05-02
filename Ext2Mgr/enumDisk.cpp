@@ -2157,12 +2157,15 @@ Ext2QueryVolumeFS(
         volume->FsaInfo.FileSystemName[1] = (WCHAR)'X';
         volume->FsaInfo.FileSystemName[2] = (WCHAR)'T';
 
-        if (sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) {
+        if ((sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_EXTENTS) ||
+            (sb->s_feature_incompat & EXT4_FEATURE_INCOMPAT_64BIT) ||
+            (sb->s_feature_ro_compat & EXT4_FEATURE_RO_COMPAT_METADATA_CSUM)) {
             volume->FsaInfo.FileSystemName[3] = (WCHAR)'4';
             volume->EVP.bExt3 = TRUE;
             // Add a "+" after the filesystem name, e.g "EXT4+", if the ondisk filesystem
             // contains features not yet supported by the Windows driver.
-            if (sb->s_feature_incompat & ~EXT4_FEATURE_INCOMPAT_SUPP) {
+            if ((sb->s_feature_incompat & ~EXT4_FEATURE_INCOMPAT_SUPP) ||
+                (sb->s_feature_ro_compat & ~EXT4_FEATURE_RO_COMPAT_SUPP)) {
                 volume->FsaInfo.FileSystemName[4] = (WCHAR)'+';
                 volume->FsaInfo.FileSystemNameLength += 2;
             }

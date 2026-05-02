@@ -44,20 +44,21 @@ static inline ext4_fsblk_t ext4_inode_to_goal_block(struct inode *inode)
 	return (inode->i_ino - 1) / BLOCKS_PER_GROUP;
 }
 
-static ext4_fsblk_t ext4_new_meta_blocks(void *icb, handle_t *handle, struct inode *inode,
-		ext4_fsblk_t goal,
+static ext4_fsblk_t ext4_new_meta_blocks(void *icb, struct inode *inode,
+		unsigned long goal,
 		unsigned int flags,
 		unsigned long *count, int *errp)
 {
 	NTSTATUS status;
 	ULONG blockcnt = (count)?*count:1;
-	ULONG block = 0;
+	ULONGLONG block = 0;
 
 	status = Ext2NewBlock((PEXT2_IRP_CONTEXT)icb,
 			inode->i_sb->s_priv,
 			0, goal,
 			&block,
 			&blockcnt);
+
 	if (count)
 		*count = blockcnt;
 
@@ -325,7 +326,7 @@ ext4_ext_new_meta_block(void *icb, handle_t *handle, struct inode *inode,
 	ext4_fsblk_t goal, newblock;
 
 	goal = ext4_ext_find_goal(inode, path, le32_to_cpu(ex->ee_block));
-	newblock = ext4_new_meta_blocks(icb, handle, inode, goal, flags,
+	newblock = ext4_new_meta_blocks(icb, inode, goal, flags,
 			NULL, err);
 	return newblock;
 }
@@ -1021,7 +1022,7 @@ static int ext4_ext_grow_indepth(void *icb, handle_t *handle, struct inode *inod
 	if (ext_depth(inode))
 		goal = ext4_idx_pblock(EXT_FIRST_INDEX(ext_inode_hdr(inode)));
 	goal = ext4_inode_to_goal_block(inode);
-	newblock = ext4_new_meta_blocks(icb, handle, inode, goal, flags,
+	newblock = ext4_new_meta_blocks(icb, inode, goal, flags,
 			NULL, &err);
 	if (newblock == 0)
 		return err;
@@ -2429,7 +2430,7 @@ int ext4_ext_get_blocks(void *icb, handle_t *handle, struct inode *inode, ext4_f
 	/* allocate new block */
 	goal = ext4_ext_find_goal(inode, path, iblock);
 
-	newblock = ext4_new_meta_blocks(icb, handle, inode, goal, 0,
+	newblock = ext4_new_meta_blocks(icb, inode, goal, 0,
 			&allocated, &err);
 	if (!newblock)
 		goto out2;

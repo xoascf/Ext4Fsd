@@ -315,62 +315,72 @@ Ext2FlushRange(IN PEXT2_VCB Vcb, LARGE_INTEGER s, LARGE_INTEGER e)
 NTSTATUS
 Ext2FlushVcb(IN PEXT2_VCB Vcb)
 {
-    LARGE_INTEGER        s = {0}, o;
+    LARGE_INTEGER        s = {0}, o, next_s;
     struct ext4_sb_info *sbi = &Vcb->sbi;
     struct rb_node      *node;
     struct buffer_head  *bh;
+    BOOLEAN              MainResourceAcquired = TRUE;
 
     if (!IsFlagOn(Vcb->Flags, VCB_GD_LOADED)) {
         CcFlushCache(&Vcb->SectionObject, NULL, 0, NULL);
-        goto errorout;
+        return STATUS_SUCCESS;
     }
 
     ASSERT(ExIsResourceAcquiredExclusiveLite(&Vcb->MainResource));
 
+    /* drop unused bh */
+    Ext2DropBH(Vcb);
+
     __try {
+        while (TRUE) {
+            struct buffer_head *found = NULL;
 
-        /* acqurie gd block */
-        ExAcquireResourceExclusiveLite(&Vcb->sbi.s_gd_lock, TRUE);
+            /* acqurie locks to search RB tree */
+            ExAcquireResourceExclusiveLite(&Vcb->sbi.s_gd_lock, TRUE);
+            ExAcquireResourceExclusiveLite(&Vcb->bd.bd_bh_lock, TRUE);
 
-        /* acquire bd lock to avoid bh creation */
-        ExAcquireResourceExclusiveLite(&Vcb->bd.bd_bh_lock, TRUE);
-
-        /* drop unused bh */
-        Ext2DropBH(Vcb);
-
-        /* flush volume with all outstanding bh skipped */
-
-        node = rb_first(&Vcb->bd.bd_bh_root);
-        while (node) {
-
-            bh = container_of(node, struct buffer_head, b_rb_node);
-            node = rb_next(node);
-
-            o.QuadPart = bh->b_blocknr << BLOCK_BITS;
-            ASSERT(o.QuadPart >= s.QuadPart);
-
-            if (o.QuadPart == s.QuadPart) {
-                s.QuadPart = s.QuadPart + bh->b_size;
-                continue;
+            /* search first BH with blocknr >= current offset */
+            node = Vcb->bd.bd_bh_root.rb_node;
+            while (node) {
+                bh = container_of(node, struct buffer_head, b_rb_node);
+                o.QuadPart = (LONGLONG)bh->b_blocknr << BLOCK_BITS;
+                if (o.QuadPart >= s.QuadPart) {
+                    found = bh;
+                    node = node->rb_left;
+                } else {
+                    node = node->rb_right;
+                }
             }
+
+            if (found) {
+                o.QuadPart = (LONGLONG)found->b_blocknr << BLOCK_BITS;
+                next_s.QuadPart = o.QuadPart + found->b_size;
+            } else {
+                o = Vcb->PartitionInformation.PartitionLength;
+            }
+
+            ExReleaseResourceLite(&Vcb->bd.bd_bh_lock);
+            ExReleaseResourceLite(&Vcb->sbi.s_gd_lock);
 
             if (o.QuadPart > s.QuadPart) {
+                /* Release MainResource to avoid recursive deadlock in CcFlushCache.
+                   The volume section is protected by its own internal locks. */
+                ExReleaseResourceLite(&Vcb->MainResource);
+                MainResourceAcquired = FALSE;
                 Ext2FlushRange(Vcb, s, o);
-                s.QuadPart = (bh->b_blocknr << BLOCK_BITS) + bh->b_size;
-                continue;
+                ExAcquireResourceExclusiveLite(&Vcb->MainResource, TRUE);
+                MainResourceAcquired = TRUE;
             }
+
+            if (!found) break;
+            s = next_s;
         }
-
-        o = Vcb->PartitionInformation.PartitionLength;
-        Ext2FlushRange(Vcb, s, o);
-
     } __finally {
-
-        ExReleaseResourceLite(&Vcb->bd.bd_bh_lock);
-        ExReleaseResourceLite(&Vcb->sbi.s_gd_lock);
+        if (!MainResourceAcquired) {
+            ExAcquireResourceExclusiveLite(&Vcb->MainResource, TRUE);
+        }
     }
 
-errorout:
     return STATUS_SUCCESS;
 }
 
@@ -971,8 +981,8 @@ Ext2NewBlock(
     IN PEXT2_IRP_CONTEXT    IrpContext,
     IN PEXT2_VCB            Vcb,
     IN ULONG                GroupHint,
-    IN ULONG                BlockHint,
-    OUT PULONG              Block,
+    IN ULONGLONG            BlockHint,
+    OUT PULONGLONG          Block,
     IN OUT PULONG           Number
 )
 {
@@ -1003,8 +1013,8 @@ Ext2NewBlock(
     }
 
     if (BlockHint != 0) {
-        GroupHint = (BlockHint - EXT2_FIRST_DATA_BLOCK) / BLOCKS_PER_GROUP;
-        dwHint = (BlockHint - EXT2_FIRST_DATA_BLOCK) % BLOCKS_PER_GROUP;
+        GroupHint = (ULONG)((BlockHint - EXT2_FIRST_DATA_BLOCK) / BLOCKS_PER_GROUP);
+        dwHint = (ULONG)((BlockHint - EXT2_FIRST_DATA_BLOCK) % BLOCKS_PER_GROUP);
     }
 
     Group = GroupHint;
@@ -1137,7 +1147,7 @@ Again:
         Ext2UpdateVcbStat(IrpContext, Vcb);
 
         /* validate the new allocated block number */
-        *Block = Index + EXT2_FIRST_DATA_BLOCK + Group * BLOCKS_PER_GROUP;
+        *Block = (ULONGLONG)Index + EXT2_FIRST_DATA_BLOCK + (ULONGLONG)Group * BLOCKS_PER_GROUP;
         if (*Block >= TOTAL_BLOCKS || *Block + *Number > TOTAL_BLOCKS) {
             DbgBreak();
             dwHint = 0;
@@ -1154,10 +1164,10 @@ Again:
 
         /* Always remove dirty MCB to prevent Volume's lazy writing.
            Metadata blocks will be re-added during modifications.*/
-        if (Ext2RemoveBlockExtent(Vcb, NULL, *Block, *Number)) {
+        if (Ext2RemoveBlockExtent(Vcb, NULL, (ULONG)*Block, *Number)) {
         } else {
             DbgBreak();
-            Ext2RemoveBlockExtent(Vcb, NULL, *Block, *Number);
+            Ext2RemoveBlockExtent(Vcb, NULL, (ULONG)*Block, *Number);
         }
 
         DEBUG(DL_INF, ("Ext2NewBlock:  Block %xh - %x allocated.\n",
@@ -1182,7 +1192,7 @@ NTSTATUS
 Ext2FreeBlock(
     IN PEXT2_IRP_CONTEXT    IrpContext,
     IN PEXT2_VCB            Vcb,
-    IN ULONG                Block,
+    IN ULONGLONG            Block,
     IN ULONG                Number
 )
 {
@@ -1207,11 +1217,11 @@ Ext2FreeBlock(
 
     ExAcquireResourceExclusiveLite(&Vcb->MetaBlock, TRUE);
 
-    DEBUG(DL_INF, ("Ext2FreeBlock: Block %xh - %x to be freed.\n",
-                   Block, Block + Number));
+    DEBUG(DL_INF, ("Ext2FreeBlock: Block %I64xh - %x to be freed.\n",
+                   Block, Number));
 
-    Group = (Block - EXT2_FIRST_DATA_BLOCK) / BLOCKS_PER_GROUP;
-    Index = (Block - EXT2_FIRST_DATA_BLOCK) % BLOCKS_PER_GROUP;
+    Group = (ULONG)((Block - EXT2_FIRST_DATA_BLOCK) / BLOCKS_PER_GROUP);
+    Index = (ULONG)((Block - EXT2_FIRST_DATA_BLOCK) % BLOCKS_PER_GROUP);
 
 Again:
 
@@ -1294,10 +1304,10 @@ Again:
         Ext2SaveGroup(IrpContext, Vcb, Group);
 
         /* remove dirty MCB to prevent Volume's lazy writing. */
-        if (Ext2RemoveBlockExtent(Vcb, NULL, Block, Count)) {
+        if (Ext2RemoveBlockExtent(Vcb, NULL, (ULONG)Block, Count)) {
         } else {
             DbgBreak();
-            Ext2RemoveBlockExtent(Vcb, NULL, Block, Count);
+            Ext2RemoveBlockExtent(Vcb, NULL, (ULONG)Block, Count);
         }
 
         /* save super block (used/unused blocks statics) */
