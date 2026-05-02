@@ -80,7 +80,7 @@ jobs:
             /p:WindowsTargetPlatformVersion=10.0.26100.0 `
             /m /v:minimal
 
-      - name: Sign driver (test-signing)
+      - name: Sign driver
         run: |
           $outDir = "Ext4Fsd\Release\x64\Ext4Fsd"
 
@@ -90,19 +90,19 @@ jobs:
             -replace '(?m)^DriverVer\s*=.*', "DriverVer   = $today,0.71.0.0" |
             Set-Content "$outDir\Ext2Fsd.inf" -Encoding UTF8
 
-          # Create a per-build test-signing certificate
-          $cert = New-SelfSignedCertificate `
-            -Type CodeSigningCert `
-            -Subject "CN=Ext2Fsd Test Certificate" `
-            -KeyUsage DigitalSignature `
-            -FriendlyName "Ext2Fsd Test Certificate" `
-            -CertStoreLocation Cert:\CurrentUser\My `
-            -HashAlgorithm SHA256 `
-            -NotAfter (Get-Date).AddYears(10)
+          # Import permanent signing certificate from GitHub Secret
+          $pfxBytes = [Convert]::FromBase64String('${{ secrets.DRIVER_CERT_PFX }}')
+          $pfxPath  = [IO.Path]::GetTempFileName() + ".pfx"
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+          $pfxPwd = ConvertTo-SecureString '${{ secrets.DRIVER_CERT_PASSWORD }}' -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath `
+            -CertStoreLocation Cert:\CurrentUser\My -Password $pfxPwd
+          Remove-Item $pfxPath -Force
+          Write-Host "Cert imported. Thumbprint: $($cert.Thumbprint)"
 
-          # Export .cer so the installer can place it on end-user machines
+          # Export .cer (public key) so the installer can guide UEFI DB enrollment
           Export-Certificate -Cert $cert `
-            -FilePath "$outDir\Ext2Fsd-TestSign.cer" -Type CERT
+            -FilePath "$outDir\Ext2Fsd-sign.cer" -Type CERT | Out-Null
 
           # Find signtool.exe and makecat.exe from the Windows SDK installed with VS
           $sdkBin = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Directory |
@@ -122,7 +122,13 @@ jobs:
             "$outDir\Ext2Fsd.sys"
           if ($LASTEXITCODE -ne 0) { throw "signtool failed on Ext2Fsd.sys" }
 
-          # Build a catalog definition file (array avoids YAML indentation issues)
+          # Re-sign ssde.sys with our cert so it can load under our UEFI DB entry
+          & $signtool sign /v /sha1 $cert.Thumbprint /fd SHA256 `
+            /tr http://timestamp.digicert.com /td SHA256 `
+            "Setup\ssde.sys"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed on ssde.sys" }
+
+          # Build a catalog definition file
           $abs = (Resolve-Path $outDir).Path
           @(
             "[CatalogHeader]",
@@ -147,7 +153,21 @@ jobs:
             "$abs\Ext2Fsd.cat"
           if ($LASTEXITCODE -ne 0) { throw "signtool failed on Ext2Fsd.cat" }
 
-          Write-Host "Test-signing complete. Thumbprint: $($cert.Thumbprint)"
+          # Download selfsign.bin (Geoff Chappell's generic code-integrity policy) and
+          # sign it with the Code Integrity Policy OID to produce SiPolicy.p7b.
+          # Licensed=1 (set by ssde_enable.exe) makes Windows accept this policy even
+          # without a Platform-Key-signed policy.
+          Invoke-WebRequest `
+            -Uri "https://www.geoffchappell.com/notes/windows/license/_download/sipolicy.zip" `
+            -OutFile "$env:TEMP\sipolicy.zip"
+          Expand-Archive "$env:TEMP\sipolicy.zip" -DestinationPath "$env:TEMP\sipolicy" -Force
+          & $signtool sign /v /fd sha256 /sha1 $cert.Thumbprint `
+            /p7co 1.3.6.1.4.1.311.79.1 /p7 "Setup" `
+            "$env:TEMP\sipolicy\selfsign.bin"
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed on SiPolicy" }
+          Rename-Item "Setup\selfsign.bin.p7" "Setup\SiPolicy.p7b" -Force
+
+          Write-Host "All signing complete. Thumbprint: $($cert.Thumbprint)"
         shell: pwsh
 
       - name: Install NSIS

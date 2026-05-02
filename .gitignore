@@ -4,3 +4,8 @@ Release/
 *.vcxproj.user
 Ext2Fsd-setup.exe
 */cab/
+# Private key — store as GitHub Secret, never commit
+Setup/*.pfx
+Setup/*.pfx.b64.txt
+# SiPolicy generated in CI
+Setup/SiPolicy.p7b
